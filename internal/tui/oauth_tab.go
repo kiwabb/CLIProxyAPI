@@ -21,6 +21,7 @@ type oauthProvider struct {
 var oauthProviders = []oauthProvider{
 	{"Claude (Anthropic)", "anthropic-auth-url", "🟧"},
 	{"Codex (OpenAI)", "codex-auth-url", "🟩"},
+	{"GitHub Copilot", "copilot-auth-url", "⬜"},
 	{"Antigravity", "antigravity-auth-url", "🟪"},
 	{"Kimi", "kimi-auth-url", "🟫"},
 	{"xAI", "xai-auth-url", "⬛"},
@@ -41,6 +42,7 @@ type oauthTabModel struct {
 	// Remote browser mode
 	authURL       string // auth URL to display
 	authState     string // OAuth state parameter
+	userCode      string // device-code flow user code
 	providerName  string // current provider name
 	callbackInput textinput.Model
 	inputActive   bool // true when user is typing callback URL
@@ -60,6 +62,7 @@ const (
 type oauthStartMsg struct {
 	url          string
 	state        string
+	userCode     string
 	providerName string
 	err          error
 }
@@ -104,11 +107,17 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 		}
 		m.authURL = msg.url
 		m.authState = msg.state
+		m.userCode = msg.userCode
 		m.providerName = msg.providerName
 		m.state = oauthRemote
 		m.callbackInput.SetValue("")
-		m.callbackInput.Focus()
-		m.inputActive = true
+		if msg.userCode == "" {
+			m.callbackInput.Focus()
+			m.inputActive = true
+		} else {
+			m.callbackInput.Blur()
+			m.inputActive = false
+		}
 		m.message = ""
 		m.viewport.SetContent(m.renderContent())
 		// Also start polling in the background
@@ -182,6 +191,7 @@ func (m oauthTabModel) Update(msg tea.Msg) (oauthTabModel, tea.Cmd) {
 				m.message = ""
 				m.authURL = ""
 				m.authState = ""
+				m.userCode = ""
 				m.viewport.SetContent(m.renderContent())
 				return m, nil
 			}
@@ -251,6 +261,7 @@ func (m oauthTabModel) startOAuth(provider oauthProvider) tea.Cmd {
 
 		authURL := getString(data, "url")
 		state := getString(data, "state")
+		userCode := getString(data, "user_code")
 		if authURL == "" {
 			return oauthStartMsg{err: fmt.Errorf("no auth URL returned for %s", provider.name)}
 		}
@@ -258,7 +269,7 @@ func (m oauthTabModel) startOAuth(provider oauthProvider) tea.Cmd {
 		// Try to open browser (best effort)
 		_ = openBrowser(authURL)
 
-		return oauthStartMsg{url: authURL, state: state, providerName: provider.name}
+		return oauthStartMsg{url: authURL, state: state, userCode: userCode, providerName: provider.name}
 	}
 }
 
@@ -274,6 +285,8 @@ func (m oauthTabModel) submitCallback(callbackURL string) tea.Cmd {
 					providerKey = "anthropic"
 				case "codex-auth-url":
 					providerKey = "codex"
+				case "copilot-auth-url":
+					providerKey = "copilot"
 				case "antigravity-auth-url":
 					providerKey = "antigravity"
 				case "kimi-auth-url":
@@ -428,6 +441,16 @@ func (m oauthTabModel) renderRemoteMode() string {
 		sb.WriteString("  " + urlStyle.Render(line) + "\n")
 	}
 	sb.WriteString("\n")
+
+	if m.userCode != "" {
+		sb.WriteString(lipgloss.NewStyle().Bold(true).Foreground(colorInfo).Render(T("oauth_device_code")))
+		sb.WriteString("\n")
+		sb.WriteString("  " + valueStyle.Render(m.userCode) + "\n\n")
+		sb.WriteString(helpStyle.Render(T("oauth_device_hint")))
+		sb.WriteString("\n\n")
+		sb.WriteString(warningStyle.Render(T("oauth_waiting")))
+		return sb.String()
+	}
 
 	sb.WriteString(helpStyle.Render(T("oauth_remote_hint")))
 	sb.WriteString("\n\n")

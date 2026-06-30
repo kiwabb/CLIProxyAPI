@@ -363,6 +363,11 @@ func (h *Handler) AuthenticateManagementKey(clientIP string, localClient bool, p
 		h.attemptsMu.Unlock()
 	}
 
+	if secretHash == "" && envSecret == "" && h.localPassword == "" && localClient && !allowRemote {
+		reset()
+		return true, 0, ""
+	}
+
 	if secretHash == "" && envSecret == "" {
 		return false, http.StatusForbidden, "remote management key not set"
 	}

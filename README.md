@@ -2,9 +2,9 @@
 
 English | [中文](README_CN.md) | [日本語](README_JA.md)
 
-A proxy server that provides OpenAI/Gemini/Claude/Codex/Grok compatible API interfaces for CLI.
+A proxy server that provides OpenAI/Gemini/Claude/Codex/Copilot/Grok compatible API interfaces for CLI.
 
-It now also supports OpenAI Codex (GPT models) and Claude Code via OAuth.
+It now also supports OpenAI Codex (GPT models), GitHub Copilot, and Claude Code via OAuth.
 
 So you can use local or multi-account CLI access with OpenAI(include Responses)/Gemini/Claude-compatible clients and SDKs.
 
@@ -55,19 +55,21 @@ PackyCode provides special discounts for our software users: register using <a h
 
 ## Overview
 
-- OpenAI/Gemini/Claude/Grok compatible API endpoints for CLI models
+- OpenAI/Gemini/Claude/Codex/Copilot/Grok compatible API endpoints for CLI models
 - OpenAI Codex support (GPT models) via OAuth login
+- GitHub Copilot support via device-code OAuth login
 - Claude Code support via OAuth login
 - Grok Build support via OAuth login
 - Streaming, non-streaming, and WebSocket responses where supported
 - Function calling/tools support
 - Multimodal input support (text and images)
-- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Claude, Grok)
-- Simple CLI authentication flows (Gemini, OpenAI, Claude, Grok)
+- Multiple accounts with round-robin load balancing (Gemini, OpenAI, Copilot, Claude, Grok)
+- Simple CLI authentication flows (Gemini, OpenAI, Copilot, Claude, Grok)
 - Generative Language API Key support
 - AI Studio Build multi-account load balancing
 - Claude Code multi-account load balancing
 - OpenAI Codex multi-account load balancing
+- GitHub Copilot multi-account load balancing
 - Grok Build multi-account load balancing
 - OpenAI-compatible upstream providers via config (e.g., OpenRouter)
 - Reusable Go SDK for embedding the proxy (see `docs/sdk-usage.md`)

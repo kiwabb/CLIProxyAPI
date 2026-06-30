@@ -49,6 +49,345 @@ import (
 
 const oauthCallbackSuccessHTML = `<html><head><meta charset="utf-8"><title>Authentication successful</title><script>setTimeout(function(){window.close();},5000);</script></head><body><h1>Authentication successful!</h1><p>You can close this window.</p><p>This window will close automatically in 5 seconds.</p></body></html>`
 
+const keylessLocalManagementAutologinScript = `<script>(function(){try{var apiBase=window.location.origin||"";var auth={state:{apiBase:apiBase,managementKey:"local",rememberPassword:true,isAuthenticated:false,connectionStatus:"disconnected"},version:0};window.localStorage.setItem("isLoggedIn","true");window.localStorage.setItem("cli-proxy-auth",JSON.stringify(auth));}catch(e){console.warn("failed to initialize local management login",e);}})();</script>`
+
+const copilotManagementOAuthScript = `<script>(function(){
+var CARD_ID="cliproxy-copilot-oauth-card";
+var pollTimer=null;
+function readAuthState(){
+	try{
+		var raw=window.localStorage&&window.localStorage.getItem("cli-proxy-auth");
+		var parsed=raw?JSON.parse(raw):null;
+		return parsed&&parsed.state?parsed.state:{};
+	}catch(e){return {};}
+}
+function apiBase(){
+	var state=readAuthState();
+	return String(state.apiBase||window.location.origin||"").replace(/\/+$/,"");
+}
+function headers(){
+	var state=readAuthState();
+	var h={"Accept":"application/json"};
+	if(state.managementKey){
+		h.Authorization="Bearer "+state.managementKey;
+	}
+	return h;
+}
+function setStatus(card,message,type){
+	var el=card.querySelector("[data-copilot-status]");
+	if(!el)return;
+	el.textContent=message||"";
+	el.dataset.type=type||"";
+}
+function setDevice(card,data){
+	var box=card.querySelector("[data-copilot-device]");
+	if(!box)return;
+	var url=data.verification_uri||data.url||"https://github.com/login/device";
+	var code=data.user_code||"";
+	box.innerHTML='<div class="cliproxy-copilot-code-row"><span>设备码</span><strong>'+escapeHTML(code)+'</strong><button type="button" data-copy-code>复制</button></div><a href="'+escapeAttr(url)+'" target="_blank" rel="noreferrer">打开 GitHub 验证页面</a>';
+	var copy=box.querySelector("[data-copy-code]");
+	if(copy){
+		copy.addEventListener("click",function(){
+			if(navigator.clipboard&&code)navigator.clipboard.writeText(code);
+			copy.textContent="已复制";
+			setTimeout(function(){copy.textContent="复制";},1500);
+		});
+	}
+}
+function escapeHTML(value){
+	return String(value==null?"":value).replace(/[&<>"']/g,function(ch){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch];});
+}
+function escapeAttr(value){return escapeHTML(value).replace(new RegExp(String.fromCharCode(96),"g"),"&#96;");}
+async function startLogin(card){
+	var button=card.querySelector("[data-copilot-start]");
+	if(button)button.disabled=true;
+	if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+	setStatus(card,"正在启动 GitHub Copilot 登录...","wait");
+	try{
+		var res=await fetch(apiBase()+"/v0/management/copilot-auth-url",{headers:headers()});
+		var data=await res.json().catch(function(){return {};});
+		if(!res.ok)throw new Error(data.error||data.message||("HTTP "+res.status));
+		setDevice(card,data);
+		setStatus(card,"请在 GitHub 页面输入设备码，完成后这里会自动更新。","wait");
+		var url=data.verification_uri||data.url;
+		if(url)window.open(url,"_blank","noopener,noreferrer");
+		var state=data.state;
+		if(!state)throw new Error("缺少 OAuth state");
+		pollTimer=setInterval(async function(){
+			try{
+				var poll=await fetch(apiBase()+"/v0/management/get-auth-status?state="+encodeURIComponent(state),{headers:headers()});
+				var body=await poll.json().catch(function(){return {};});
+				if(body.status==="ok"){
+					clearInterval(pollTimer);pollTimer=null;
+					setStatus(card,"Copilot 登录成功，认证文件已保存。","ok");
+					if(button)button.disabled=false;
+				}else if(body.status==="error"){
+					clearInterval(pollTimer);pollTimer=null;
+					setStatus(card,"Copilot 登录失败："+(body.error||"未知错误"),"error");
+					if(button)button.disabled=false;
+				}
+			}catch(e){
+				setStatus(card,"状态检查失败："+(e&&e.message?e.message:e),"error");
+			}
+		},3000);
+	}catch(e){
+		setStatus(card,"启动失败："+(e&&e.message?e.message:e),"error");
+		if(button)button.disabled=false;
+	}
+}
+function styles(){
+	if(document.getElementById("cliproxy-copilot-oauth-style"))return;
+	var style=document.createElement("style");
+	style.id="cliproxy-copilot-oauth-style";
+	style.textContent=".cliproxy-copilot-status{margin-top:12px;font-size:14px}.cliproxy-copilot-status[data-type=ok]{color:#15803d}.cliproxy-copilot-status[data-type=error]{color:#dc2626}.cliproxy-copilot-status[data-type=wait]{color:#0369a1}.cliproxy-copilot-device{display:grid;gap:10px;margin-top:12px}.cliproxy-copilot-device a{color:#2563eb;text-decoration:none}.cliproxy-copilot-code-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap}.cliproxy-copilot-code-row strong{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace;font-size:18px;letter-spacing:0;background:rgba(2,6,23,.06);border-radius:6px;padding:6px 8px}.cliproxy-copilot-code-row button{padding:6px 10px}";
+	document.head.appendChild(style);
+}
+function findOAuthRoot(){
+	if(window.location.hash!=="#/oauth")return null;
+	var headings=Array.prototype.slice.call(document.querySelectorAll("h1,h2"));
+	for(var i=0;i<headings.length;i++){
+		if((headings[i].textContent||"").trim()==="OAuth 登录"){
+			var container=headings[i].parentElement||headings[i];
+			return container.querySelector("[class*='content']")||container;
+		}
+	}
+	return null;
+}
+function findProviderCard(name){
+	var nodes=Array.prototype.slice.call(document.querySelectorAll("*"));
+	for(var i=0;i<nodes.length;i++){
+		if((nodes[i].textContent||"").trim()!==name)continue;
+		var el=nodes[i];
+		for(var depth=0;depth<8&&el;depth++,el=el.parentElement){
+			if(el.classList&&el.classList.contains("card")){
+				return {card:el, wrapper:el.parentElement||el};
+			}
+		}
+	}
+	return null;
+}
+function setCardTitle(card){
+	var title=card.querySelector(".title span")||card.querySelector("[class*='cardTitle']");
+	if(!title)return;
+	var iconClass="";
+	var oldIcon=title.querySelector("img");
+	if(oldIcon)iconClass=oldIcon.className||"";
+	title.textContent="";
+	var icon=document.createElement("img");
+	icon.alt="";
+	if(iconClass)icon.className=iconClass;
+	icon.src="data:image/svg+xml,%3csvg%20fill='%23181717'%20height='1em'%20viewBox='0%200%2024%2024'%20width='1em'%20xmlns='http://www.w3.org/2000/svg'%3e%3ctitle%3eGitHub%3c/title%3e%3cpath%20d='M12%20.5C5.65.5.5%205.65.5%2012c0%205.09%203.29%209.4%207.86%2010.93.58.11.79-.25.79-.56v-2.02c-3.2.7-3.87-1.54-3.87-1.54-.52-1.33-1.28-1.68-1.28-1.68-1.05-.72.08-.7.08-.7%201.16.08%201.77%201.19%201.77%201.19%201.03%201.76%202.7%201.25%203.36.96.1-.75.4-1.25.73-1.54-2.55-.29-5.23-1.28-5.23-5.68%200-1.25.45-2.28%201.18-3.08-.12-.29-.51-1.46.11-3.04%200%200%20.96-.31%203.16%201.18A10.95%2010.95%200%200112%205.5c.98%200%201.97.13%202.89.39%202.19-1.49%203.15-1.18%203.15-1.18.63%201.58.24%202.75.12%203.04.74.8%201.18%201.83%201.18%203.08%200%204.42-2.69%205.38-5.25%205.67.41.35.78%201.05.78%202.13v3.16c0%20.31.21.68.79.56A11.51%2011.51%200%200023.5%2012C23.5%205.65%2018.35.5%2012%20.5z'/%3e%3c/svg%3e";
+	title.appendChild(icon);
+	title.appendChild(document.createTextNode("GitHub Copilot OAuth"));
+}
+function prepareNativeCard(wrapper){
+	var card=wrapper.querySelector(".card")||wrapper;
+	setCardTitle(card);
+	var button=card.querySelector("button");
+	if(button){
+		button.disabled=false;
+		button.removeAttribute("aria-disabled");
+		button.dataset.copilotStart="1";
+		var span=button.querySelector("span");
+		if(span)span.textContent="开始 Copilot 登录";
+		else button.textContent="开始 Copilot 登录";
+		button.addEventListener("click",function(event){event.preventDefault();event.stopPropagation();startLogin(wrapper);});
+	}
+	var hint=card.querySelector("[class*='cardHint']");
+	if(hint)hint.textContent="通过 GitHub 设备码登录 Copilot，自动获取并保存认证文件。";
+	var content=card.querySelector("[class*='cardContent']")||card;
+	var device=document.createElement("div");
+	device.className="cliproxy-copilot-device";
+	device.setAttribute("data-copilot-device","");
+	var status=document.createElement("div");
+	status.className="cliproxy-copilot-status";
+	status.setAttribute("data-copilot-status","");
+	content.appendChild(device);
+	content.appendChild(status);
+}
+function render(){
+	var existing=document.getElementById(CARD_ID);
+	var root=findOAuthRoot();
+	if(!root){if(existing)existing.remove();return;}
+	if(existing)return;
+	var template=findProviderCard("Kimi OAuth")||findProviderCard("xAI OAuth")||findProviderCard("Codex OAuth");
+	if(!template)return;
+	styles();
+	var wrapper=template.wrapper.cloneNode(true);
+	wrapper.id=CARD_ID;
+	prepareNativeCard(wrapper);
+	root.appendChild(wrapper);
+}
+window.addEventListener("hashchange",function(){setTimeout(render,100);});
+new MutationObserver(function(){render();}).observe(document.documentElement,{childList:true,subtree:true});
+setTimeout(render,0);
+setTimeout(render,800);
+})();</script>`
+
+const copilotManagementQuotaScript = `<script>(function(){
+var CARD_ID="cliproxy-copilot-quota-card";
+function readAuthState(){
+	try{
+		var raw=window.localStorage&&window.localStorage.getItem("cli-proxy-auth");
+		var parsed=raw?JSON.parse(raw):null;
+		return parsed&&parsed.state?parsed.state:{};
+	}catch(e){return {};}
+}
+function apiBase(){
+	var state=readAuthState();
+	return String(state.apiBase||window.location.origin||"").replace(/\/+$/,"");
+}
+function headers(){
+	var state=readAuthState();
+	var h={"Accept":"application/json"};
+	if(state.managementKey){
+		h.Authorization="Bearer "+state.managementKey;
+	}
+	return h;
+}
+function escapeHTML(value){
+	return String(value==null?"":value).replace(/[&<>"']/g,function(ch){return {"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[ch];});
+}
+function styles(){
+	if(document.getElementById("cliproxy-copilot-quota-style"))return;
+	var style=document.createElement("style");
+	style.id="cliproxy-copilot-quota-style";
+	style.textContent=".cliproxy-copilot-quota-list{display:grid;gap:12px;padding:16px}.cliproxy-copilot-quota-auth{border:1px solid rgba(127,127,127,.18);border-radius:8px;padding:14px}.cliproxy-copilot-quota-auth-title{font-weight:650;margin-bottom:4px}.cliproxy-copilot-quota-plan{opacity:.72;font-size:13px;margin-bottom:12px}.cliproxy-copilot-quota-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:10px}.cliproxy-copilot-quota-item{border:1px solid rgba(127,127,127,.16);border-radius:8px;padding:10px}.cliproxy-copilot-quota-name{font-weight:600;margin-bottom:6px;text-transform:capitalize}.cliproxy-copilot-quota-meta{font-size:13px;opacity:.72}.cliproxy-copilot-quota-bar{height:6px;border-radius:999px;background:rgba(127,127,127,.18);overflow:hidden;margin-top:8px}.cliproxy-copilot-quota-fill{height:100%;border-radius:999px;background:#2563eb}.cliproxy-copilot-quota-error{color:#dc2626;font-size:13px;margin-top:8px}.cliproxy-copilot-quota-loading{padding:16px;opacity:.72}";
+	document.head.appendChild(style);
+}
+function findQuotaRoot(){
+	if(window.location.hash!=="#/quota")return null;
+	var headings=Array.prototype.slice.call(document.querySelectorAll("h1,h2"));
+	for(var i=0;i<headings.length;i++){
+		if((headings[i].textContent||"").trim()==="配额管理"){
+			var container=headings[i].parentElement||headings[i];
+			return container.querySelector("[class*='content']")||container;
+		}
+	}
+	return null;
+}
+function findQuotaCard(name){
+	var cards=Array.prototype.slice.call(document.querySelectorAll(".card"));
+	for(var i=0;i<cards.length;i++){
+		if((cards[i].innerText||"").indexOf(name)>=0)return cards[i];
+	}
+	return null;
+}
+function setTitle(card){
+	var title=card.querySelector(".title span")||card.querySelector(".title");
+	if(title)title.textContent="Copilot 额度";
+}
+function emptyHTML(){
+	return '<div class="empty-state"><div class="empty-content"><div class="empty-icon" aria-hidden="true"></div><div><div class="empty-title">暂无 Copilot 认证</div><div class="empty-desc">使用 Copilot OAuth 登录后即可查看额度。</div></div></div></div>';
+}
+function quotaValue(snap){
+	if(!snap)return null;
+	var remaining=Number.isFinite(Number(snap.remaining))?Number(snap.remaining):Number(snap.quota_remaining);
+	var entitlement=Number(snap.entitlement);
+	var percent=Number(snap.percent_remaining);
+	if(!Number.isFinite(percent)&&Number.isFinite(remaining)&&Number.isFinite(entitlement)&&entitlement>0)percent=remaining/entitlement*100;
+	return {remaining:remaining, entitlement:entitlement, percent:percent, unlimited:!!snap.unlimited};
+}
+function renderUsage(card,payload){
+	var body=card.querySelector("[data-copilot-quota-body]");
+	if(!body)return;
+	var usages=payload&&Array.isArray(payload.usages)?payload.usages:[];
+	if(usages.length===0){
+		body.innerHTML=emptyHTML();
+		return;
+	}
+	var html='<div class="cliproxy-copilot-quota-list">';
+	usages.forEach(function(entry){
+		html+='<div class="cliproxy-copilot-quota-auth"><div class="cliproxy-copilot-quota-auth-title">'+escapeHTML(entry.label||entry.name||entry.id||"Copilot")+'</div>';
+		if(entry.error){
+			html+='<div class="cliproxy-copilot-quota-error">'+escapeHTML(entry.error)+'</div></div>';
+			return;
+		}
+		var usage=entry.usage||{};
+		html+='<div class="cliproxy-copilot-quota-plan">套餐：'+escapeHTML(usage.copilot_plan||usage.access_type_sku||"未知")+'</div>';
+		var snaps=usage.quota_snapshots||{};
+		var keys=Object.keys(snaps);
+		if(keys.length===0){
+			html+='<div class="cliproxy-copilot-quota-meta">暂无额度数据</div></div>';
+			return;
+		}
+		html+='<div class="cliproxy-copilot-quota-grid">';
+		keys.forEach(function(key){
+			var snap=snaps[key]||{};
+			var q=quotaValue(snap);
+			var percent=q&&Number.isFinite(q.percent)?Math.max(0,Math.min(100,q.percent)):0;
+			var detail=q&&q.unlimited?"无限制":(q&&Number.isFinite(q.remaining)?("剩余 "+q.remaining+(Number.isFinite(q.entitlement)?(" / "+q.entitlement):"")):"额度未知");
+			html+='<div class="cliproxy-copilot-quota-item"><div class="cliproxy-copilot-quota-name">'+escapeHTML(key.replace(/_/g," "))+'</div><div class="cliproxy-copilot-quota-meta">'+escapeHTML(detail)+'</div><div class="cliproxy-copilot-quota-bar"><div class="cliproxy-copilot-quota-fill" style="width:'+percent.toFixed(0)+'%"></div></div></div>';
+		});
+		html+='</div></div>';
+	});
+	html+='</div>';
+	body.innerHTML=html;
+}
+async function load(card){
+	var body=card.querySelector("[data-copilot-quota-body]");
+	var button=card.querySelector("[data-copilot-quota-refresh]");
+	if(button)button.disabled=true;
+	if(body)body.innerHTML='<div class="cliproxy-copilot-quota-loading">正在加载额度...</div>';
+	try{
+		var res=await fetch(apiBase()+"/v0/management/copilot-usage",{headers:headers()});
+		var data=await res.json().catch(function(){return {};});
+		if(!res.ok)throw new Error(data.error||data.message||("HTTP "+res.status));
+		renderUsage(card,data);
+	}catch(e){
+		if(body)body.innerHTML='<div class="empty-state"><div class="empty-content"><div><div class="empty-title">Copilot 额度获取失败</div><div class="empty-desc">'+escapeHTML(e&&e.message?e.message:e)+'</div></div></div></div>';
+	}finally{
+		if(button)button.disabled=false;
+	}
+}
+function prepare(card){
+	card.id=CARD_ID;
+	setTitle(card);
+	var actions=card.querySelector("[class*='headerActions']");
+	if(actions){
+		var toggles=actions.querySelector("[class*='viewModeToggle']");
+		if(toggles)toggles.remove();
+		var refresh=actions.querySelector("button");
+		if(refresh){
+			refresh.dataset.copilotQuotaRefresh="1";
+			refresh.title="刷新全部凭证";
+			refresh.setAttribute("aria-label","刷新全部凭证");
+			var span=refresh.querySelector("span");
+			if(span){
+				var svg=span.querySelector("svg");
+				span.textContent="";
+				if(svg)span.appendChild(svg);
+				span.appendChild(document.createTextNode("刷新全部凭证"));
+			}
+			refresh.addEventListener("click",function(event){event.preventDefault();event.stopPropagation();load(card);});
+		}
+	}
+	var oldBodies=Array.prototype.slice.call(card.children).filter(function(el){return !el.classList.contains("card-header");});
+	oldBodies.forEach(function(el){el.remove();});
+	var body=document.createElement("div");
+	body.setAttribute("data-copilot-quota-body","");
+	body.innerHTML=emptyHTML();
+	card.appendChild(body);
+	load(card);
+}
+function render(){
+	var existing=document.getElementById(CARD_ID);
+	var root=findQuotaRoot();
+	if(!root){if(existing)existing.remove();return;}
+	if(existing)return;
+	var template=findQuotaCard("Kimi 额度")||findQuotaCard("Codex 额度")||findQuotaCard("Claude 额度");
+	if(!template)return;
+	styles();
+	var card=template.cloneNode(true);
+	prepare(card);
+	root.appendChild(card);
+}
+window.addEventListener("hashchange",function(){setTimeout(render,100);});
+new MutationObserver(function(){render();}).observe(document.documentElement,{childList:true,subtree:true});
+setTimeout(render,0);
+setTimeout(render,800);
+})();</script>`
+
 var corsExposedResponseHeaders = []string{
 	"X-CPA-VERSION",
 	"X-CPA-COMMIT",
@@ -362,11 +701,12 @@ func NewServer(cfg *config.Config, authManager *auth.Manager, accessManager *sdk
 	}
 
 	// Register management routes when configuration or environment secrets are available,
-	// or when a local management password is provided (e.g. TUI mode).
-	hasManagementSecret := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != ""
-	s.managementRoutesEnabled.Store(hasManagementSecret)
-	redisqueue.SetEnabled(hasManagementSecret || (cfg != nil && cfg.Home.Enabled))
-	if hasManagementSecret {
+	// when a local management password is provided (e.g. TUI mode), or when
+	// localhost-only management is intentionally left keyless for local development.
+	hasManagementAccess := cfg.RemoteManagement.SecretKey != "" || envManagementSecret || s.localPassword != "" || !cfg.RemoteManagement.AllowRemote
+	s.managementRoutesEnabled.Store(hasManagementAccess)
+	redisqueue.SetEnabled(hasManagementAccess || (cfg != nil && cfg.Home.Enabled))
+	if hasManagementAccess {
 		s.registerManagementRoutes()
 	}
 	s.refreshPluginManagementRoutes()
@@ -721,6 +1061,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/auth-files", s.mgmt.ListAuthFiles)
 		mgmt.GET("/auth-files/models", s.mgmt.GetAuthFileModels)
+		mgmt.GET("/copilot-usage", s.mgmt.GetCopilotUsage)
 		mgmt.GET("/model-definitions/:channel", s.mgmt.GetStaticModelDefinitions)
 		mgmt.GET("/auth-files/download", s.mgmt.DownloadAuthFile)
 		mgmt.POST("/auth-files", s.mgmt.UploadAuthFile)
@@ -731,6 +1072,7 @@ func (s *Server) registerManagementRoutes() {
 
 		mgmt.GET("/anthropic-auth-url", s.mgmt.RequestAnthropicToken)
 		mgmt.GET("/codex-auth-url", s.mgmt.RequestCodexToken)
+		mgmt.GET("/copilot-auth-url", s.mgmt.RequestCopilotToken)
 		mgmt.GET("/antigravity-auth-url", s.mgmt.RequestAntigravityToken)
 		mgmt.GET("/kimi-auth-url", s.mgmt.RequestKimiToken)
 		mgmt.GET("/xai-auth-url", s.mgmt.RequestXAIToken)
@@ -871,7 +1213,42 @@ func (s *Server) serveManagementControlPanel(c *gin.Context) {
 		}
 	}
 
+	scripts := s.managementControlPanelScripts()
+	if len(scripts) > 0 {
+		data, err := os.ReadFile(filePath)
+		if err != nil {
+			log.WithError(err).Error("failed to read management control panel asset")
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+		html := string(data)
+		injection := strings.Join(scripts, "")
+		if strings.Contains(html, "</head>") {
+			html = strings.Replace(html, "</head>", injection+"</head>", 1)
+		} else {
+			html = injection + html
+		}
+		c.Header("Cache-Control", "no-store")
+		c.Data(http.StatusOK, "text/html; charset=utf-8", []byte(html))
+		return
+	}
+
 	c.File(filePath)
+}
+
+func (s *Server) managementControlPanelScripts() []string {
+	scripts := []string{copilotManagementOAuthScript, copilotManagementQuotaScript}
+	if s.keylessLocalManagementAutologinEnabled() {
+		scripts = append([]string{keylessLocalManagementAutologinScript}, scripts...)
+	}
+	return scripts
+}
+
+func (s *Server) keylessLocalManagementAutologinEnabled() bool {
+	if s == nil || s.cfg == nil || s.envManagementSecret || strings.TrimSpace(s.localPassword) != "" {
+		return false
+	}
+	return !s.cfg.RemoteManagement.AllowRemote && strings.TrimSpace(s.cfg.RemoteManagement.SecretKey) == ""
 }
 
 func (s *Server) enableKeepAlive(timeout time.Duration, onTimeout func()) {
@@ -1664,14 +2041,14 @@ func (s *Server) UpdateClients(cfg *config.Config) {
 			} else {
 				s.managementRoutesEnabled.Store(true)
 			}
-		case !prevSecretEmpty && newSecretEmpty:
+		case !prevSecretEmpty && newSecretEmpty && cfg.RemoteManagement.AllowRemote:
 			if s.managementRoutesEnabled.CompareAndSwap(true, false) {
 				log.Info("management routes disabled after secret key removal")
 			} else {
 				s.managementRoutesEnabled.Store(false)
 			}
 		default:
-			s.managementRoutesEnabled.Store(!newSecretEmpty)
+			s.managementRoutesEnabled.Store(!newSecretEmpty || !cfg.RemoteManagement.AllowRemote)
 		}
 	}
 	redisqueue.SetEnabled(s.managementRoutesEnabled.Load() || (cfg != nil && cfg.Home.Enabled))

@@ -25,6 +25,7 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/antigravity"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/claude"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/codex"
+	copilotauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/auth/kimi"
 	xaiauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/xai"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/config"
@@ -66,6 +67,7 @@ var (
 	errAuthFileNotFound   = errors.New("auth file not found")
 	errPluginVirtualAuth  = errors.New("plugin virtual auth cannot be modified directly; edit or delete the source auth file")
 	newCodexOAuthService  = func(cfg *config.Config) codexOAuthService { return codex.NewCodexAuth(cfg) }
+	fetchCopilotUsage     = copilotauth.FetchUsage
 )
 
 func extractLastRefreshTimestamp(meta map[string]any) (time.Time, bool) {
@@ -386,6 +388,93 @@ func (h *Handler) GetAuthFileModels(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{"models": result})
+}
+
+func (h *Handler) GetCopilotUsage(c *gin.Context) {
+	if h == nil || h.authManager == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "core auth manager unavailable"})
+		return
+	}
+
+	authIndex := strings.TrimSpace(c.Query("auth_index"))
+	if authIndex != "" {
+		auth := h.authByIndex(authIndex)
+		if auth == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "auth not found"})
+			return
+		}
+		if strings.ToLower(strings.TrimSpace(auth.Provider)) != copilotauth.Provider {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "auth is not a GitHub Copilot credential"})
+			return
+		}
+		usage, errUsage := h.fetchCopilotUsageForAuth(c.Request.Context(), auth)
+		if errUsage != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": errUsage.Error()})
+			return
+		}
+		auth.EnsureIndex()
+		c.JSON(http.StatusOK, gin.H{
+			"status":     "ok",
+			"auth_index": auth.Index,
+			"id":         auth.ID,
+			"name":       auth.FileName,
+			"label":      auth.Label,
+			"usage":      usage,
+		})
+		return
+	}
+
+	auths := h.authManager.List()
+	results := make([]gin.H, 0)
+	for _, auth := range auths {
+		if auth == nil || strings.ToLower(strings.TrimSpace(auth.Provider)) != copilotauth.Provider {
+			continue
+		}
+		auth.EnsureIndex()
+		entry := gin.H{
+			"auth_index": auth.Index,
+			"id":         auth.ID,
+			"name":       auth.FileName,
+			"label":      auth.Label,
+		}
+		usage, errUsage := h.fetchCopilotUsageForAuth(c.Request.Context(), auth)
+		if errUsage != nil {
+			entry["error"] = errUsage.Error()
+		} else {
+			entry["usage"] = usage
+		}
+		results = append(results, entry)
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok", "usages": results})
+}
+
+func (h *Handler) fetchCopilotUsageForAuth(ctx context.Context, auth *coreauth.Auth) (*copilotauth.UsageResponse, error) {
+	githubToken := ""
+	if auth != nil && auth.Metadata != nil {
+		githubToken, _ = auth.Metadata["github_token"].(string)
+	}
+	githubToken = strings.TrimSpace(githubToken)
+	if githubToken == "" {
+		return nil, fmt.Errorf("missing GitHub token for Copilot auth")
+	}
+	httpClient := &http.Client{}
+	if h != nil && h.cfg != nil {
+		httpClient = util.SetProxy(&h.cfg.SDKConfig, httpClient)
+	}
+	vscodeVersion := copilotauth.DefaultVSCodeVersion
+	if auth != nil {
+		if auth.Attributes != nil {
+			if value := strings.TrimSpace(auth.Attributes["vscode_version"]); value != "" {
+				vscodeVersion = value
+			}
+		}
+		if vscodeVersion == copilotauth.DefaultVSCodeVersion && auth.Metadata != nil {
+			if value, ok := auth.Metadata["vscode_version"].(string); ok && strings.TrimSpace(value) != "" {
+				vscodeVersion = strings.TrimSpace(value)
+			}
+		}
+	}
+	return fetchCopilotUsage(ctx, httpClient, githubToken, vscodeVersion)
 }
 
 // List auth files from disk when the auth manager is unavailable.
@@ -2107,6 +2196,98 @@ func (h *Handler) RequestCodexToken(c *gin.Context) {
 	}()
 
 	c.JSON(200, gin.H{"status": "ok", "url": authURL, "state": state})
+}
+
+func (h *Handler) RequestCopilotToken(c *gin.Context) {
+	ctx := context.Background()
+	ctx = PopulateAuthContext(ctx, c)
+
+	fmt.Println("Initializing GitHub Copilot authentication...")
+
+	state, errState := misc.GenerateRandomState()
+	if errState != nil {
+		log.Errorf("Failed to generate state parameter: %v", errState)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate state parameter"})
+		return
+	}
+
+	httpClient := &http.Client{}
+	if h.cfg != nil {
+		httpClient = util.SetProxy(&h.cfg.SDKConfig, httpClient)
+	}
+	deviceCode, errDeviceCode := copilotauth.RequestDeviceCode(ctx, httpClient)
+	if errDeviceCode != nil {
+		log.Errorf("Failed to start GitHub device flow: %v", errDeviceCode)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start github device flow"})
+		return
+	}
+
+	RegisterOAuthSession(state, copilotauth.Provider)
+
+	go func() {
+		fmt.Println("Waiting for GitHub Copilot device authentication...")
+		githubToken, errPoll := copilotauth.PollAccessToken(ctx, httpClient, deviceCode)
+		if errPoll != nil {
+			log.Errorf("GitHub Copilot authentication failed: %v", errPoll)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("GitHub Copilot authentication failed", errPoll))
+			return
+		}
+		if !IsOAuthSessionPending(state, copilotauth.Provider) {
+			return
+		}
+
+		user, errUser := copilotauth.FetchUser(ctx, httpClient, githubToken)
+		if errUser != nil {
+			log.Errorf("Failed to fetch GitHub user info: %v", errUser)
+			SetOAuthSessionError(state, oauthSessionErrorWithCause("Failed to fetch GitHub user info", errUser))
+			return
+		}
+		if !IsOAuthSessionPending(state, copilotauth.Provider) {
+			return
+		}
+
+		login := strings.TrimSpace(user.Login)
+		if login == "" {
+			login = fmt.Sprintf("github-%d", user.ID)
+		}
+		accountHash := copilotauth.AccountHash(fmt.Sprintf("%s:%d", login, user.ID))
+		fileName := fmt.Sprintf("copilot-%s.json", accountHash)
+		record := &coreauth.Auth{
+			ID:       fileName,
+			Provider: copilotauth.Provider,
+			FileName: fileName,
+			Label:    login,
+			Metadata: map[string]any{
+				"type":         copilotauth.Provider,
+				"email":        login,
+				"login":        login,
+				"github_id":    user.ID,
+				"github_token": githubToken,
+				"auth_kind":    "oauth",
+			},
+			Attributes: map[string]string{
+				"auth_kind": "oauth",
+			},
+		}
+
+		savedPath, errSave := h.saveTokenRecord(ctx, record)
+		if errSave != nil {
+			log.Errorf("Failed to save GitHub Copilot token to file: %v", errSave)
+			SetOAuthSessionError(state, "Failed to save authentication tokens")
+			return
+		}
+
+		CompleteOAuthSession(state)
+		fmt.Printf("GitHub Copilot authentication successful as %s. Token saved to %s\n", login, savedPath)
+	}()
+
+	c.JSON(200, gin.H{
+		"status":           "ok",
+		"url":              deviceCode.VerificationURI,
+		"state":            state,
+		"user_code":        deviceCode.UserCode,
+		"verification_uri": deviceCode.VerificationURI,
+	})
 }
 
 func (h *Handler) RequestAntigravityToken(c *gin.Context) {

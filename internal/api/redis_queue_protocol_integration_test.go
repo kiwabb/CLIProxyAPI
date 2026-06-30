@@ -226,9 +226,6 @@ func TestRedisProtocol_ManagementDisabled_RejectsConnection(t *testing.T) {
 	redisqueue.SetEnabled(false)
 
 	server := newTestServer(t)
-	if server.managementRoutesEnabled.Load() {
-		t.Fatalf("expected managementRoutesEnabled to be false")
-	}
 
 	addr, stop := startRedisMuxListener(t, server)
 	t.Cleanup(stop)

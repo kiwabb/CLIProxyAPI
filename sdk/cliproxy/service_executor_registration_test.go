@@ -84,6 +84,7 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 		"antigravity",
 		"kimi",
 		"xai",
+		"copilot",
 		"openai-compatibility",
 		"plugin-provider",
 	}
@@ -97,6 +98,23 @@ func TestRegisterAvailableExecutors(t *testing.T) {
 	resolved, _ := service.coreManager.Executor("plugin-provider")
 	if _, isPlugin := resolved.(serviceTestPluginExecutor); !isPlugin {
 		t.Fatalf("executor type = %T, want serviceTestPluginExecutor", resolved)
+	}
+}
+
+func TestRegisterExecutorForAuth_CopilotUsesNativeExecutor(t *testing.T) {
+	service := &Service{
+		cfg:         &config.Config{},
+		coreManager: coreauth.NewManager(nil, nil, nil),
+	}
+
+	service.registerExecutorForAuth(&coreauth.Auth{ID: "copilot-auth", Provider: "copilot"}, true)
+
+	resolved, ok := service.coreManager.Executor("copilot")
+	if !ok {
+		t.Fatal("expected copilot executor")
+	}
+	if _, okCopilot := resolved.(*runtimeexecutor.CopilotExecutor); !okCopilot {
+		t.Fatalf("executor type = %T, want *executor.CopilotExecutor", resolved)
 	}
 }
 

@@ -63,6 +63,9 @@ func (s *Server) handleRedisConnection(conn net.Conn, reader *bufio.Reader) {
 		_ = writer.Flush()
 		return
 	}
+	if !s.redisManagementAuthEnabled() {
+		return
+	}
 
 	for {
 		if !s.managementRoutesEnabled.Load() {
@@ -376,6 +379,16 @@ func resolveRemoteIP(addr net.Addr) (ip string, localClient bool) {
 	host = strings.TrimSpace(host)
 	localClient = host == "127.0.0.1" || host == "::1"
 	return host, localClient
+}
+
+func (s *Server) redisManagementAuthEnabled() bool {
+	if s == nil {
+		return false
+	}
+	if s.envManagementSecret || strings.TrimSpace(s.localPassword) != "" {
+		return true
+	}
+	return s.cfg != nil && strings.TrimSpace(s.cfg.RemoteManagement.SecretKey) != ""
 }
 
 func parseAuthPassword(args []string) (string, bool) {

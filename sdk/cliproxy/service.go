@@ -7,12 +7,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/api"
+	copilotauth "github.com/router-for-me/CLIProxyAPI/v7/internal/auth/copilot"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/home"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/logging"
 	"github.com/router-for-me/CLIProxyAPI/v7/internal/pluginhost"
@@ -420,6 +422,7 @@ func newDefaultAuthManager() *sdkAuth.Manager {
 		sdkAuth.NewCodexAuthenticator(),
 		sdkAuth.NewClaudeAuthenticator(),
 		sdkAuth.NewXAIAuthenticator(),
+		sdkAuth.NewCopilotAuthenticator(),
 	)
 }
 
@@ -914,6 +917,7 @@ func baselineExecutorAuths() []*coreauth.Auth {
 		"antigravity",
 		"kimi",
 		"xai",
+		"copilot",
 		"openai-compatibility",
 	}
 	auths := make([]*coreauth.Auth, 0, len(providers))
@@ -994,6 +998,8 @@ func (s *Service) registerExecutorForAuth(a *coreauth.Auth, forceReplace bool) {
 		s.coreManager.RegisterExecutor(executor.NewKimiExecutor(s.cfg))
 	case "xai":
 		s.coreManager.RegisterExecutor(executor.NewXAIAutoExecutor(s.cfg))
+	case "copilot":
+		s.coreManager.RegisterExecutor(executor.NewCopilotExecutor(s.cfg))
 	default:
 		providerKey := strings.ToLower(strings.TrimSpace(a.Provider))
 		if providerKey == "" {
@@ -1036,6 +1042,112 @@ func (s *Service) registerResolvedModelsForAuth(a *coreauth.Auth, providerKey st
 		return
 	}
 	GlobalModelRegistry().RegisterClient(a.ID, providerKey, normalizedModels)
+}
+
+func (s *Service) fetchCopilotModelsForAuth(ctx context.Context, a *coreauth.Auth) []*ModelInfo {
+	if a == nil || a.Metadata == nil {
+		return nil
+	}
+	githubToken, _ := a.Metadata["github_token"].(string)
+	githubToken = strings.TrimSpace(githubToken)
+	if githubToken == "" {
+		return nil
+	}
+	httpClient := &http.Client{}
+	if s != nil && s.cfg != nil {
+		httpClient = util.SetProxy(&s.cfg.SDKConfig, httpClient)
+	}
+	tokenResp, err := copilotauth.FetchCopilotToken(ctx, httpClient, githubToken, copilotVSCodeVersion(a))
+	if err != nil {
+		log.Debugf("failed to fetch Copilot token for model registration: %v", err)
+		return nil
+	}
+	if a.Metadata == nil {
+		a.Metadata = make(map[string]any)
+	}
+	a.Metadata["copilot_token"] = tokenResp.Token
+	a.Metadata["copilot_token_expires_at"] = tokenResp.ExpiresAt
+	modelResp, err := copilotauth.FetchModels(ctx, httpClient, copilotBaseURL(a), tokenResp.Token, copilotVSCodeVersion(a))
+	if err != nil {
+		log.Debugf("failed to fetch Copilot models: %v", err)
+		return nil
+	}
+	return copilotModelsToModelInfo(modelResp.Data)
+}
+
+func copilotModelsToModelInfo(models []copilotauth.Model) []*ModelInfo {
+	out := make([]*ModelInfo, 0, len(models))
+	for _, model := range models {
+		id := strings.TrimSpace(model.ID)
+		if id == "" {
+			continue
+		}
+		displayName := strings.TrimSpace(model.Name)
+		if displayName == "" {
+			displayName = id
+		}
+		ownedBy := strings.TrimSpace(model.Vendor)
+		if ownedBy == "" {
+			ownedBy = "github-copilot"
+		}
+		modelType := strings.TrimSpace(model.Capabilities.Type)
+		if modelType == "" {
+			modelType = "openai"
+		}
+		out = append(out, &ModelInfo{
+			ID:                  id,
+			Object:              "model",
+			Created:             1704067200,
+			OwnedBy:             ownedBy,
+			Type:                modelType,
+			DisplayName:         displayName,
+			Version:             strings.TrimSpace(model.Version),
+			ContextLength:       model.Capabilities.Limits.MaxContextWindowTokens,
+			MaxCompletionTokens: model.Capabilities.Limits.MaxOutputTokens,
+		})
+	}
+	return out
+}
+
+func defaultCopilotModels() []*ModelInfo {
+	return []*ModelInfo{
+		{ID: "gpt-4.1", Object: "model", Created: 1704067200, OwnedBy: "github-copilot", Type: "openai", DisplayName: "GPT-4.1"},
+		{ID: "gpt-4o", Object: "model", Created: 1704067200, OwnedBy: "github-copilot", Type: "openai", DisplayName: "GPT-4o"},
+		{ID: "claude-sonnet-4", Object: "model", Created: 1704067200, OwnedBy: "github-copilot", Type: "openai", DisplayName: "Claude Sonnet 4"},
+	}
+}
+
+func copilotBaseURL(a *coreauth.Auth) string {
+	if baseURL := strings.TrimRight(copilotAuthString(a, "base_url"), "/"); baseURL != "" {
+		return baseURL
+	}
+	accountType := strings.ToLower(copilotAuthString(a, "account_type"))
+	switch accountType {
+	case "business", "enterprise":
+		return "https://api." + accountType + ".githubcopilot.com"
+	}
+	return copilotauth.DefaultCopilotBaseURL
+}
+
+func copilotVSCodeVersion(a *coreauth.Auth) string {
+	if version := copilotAuthString(a, "vscode_version"); version != "" {
+		return version
+	}
+	return copilotauth.DefaultVSCodeVersion
+}
+
+func copilotAuthString(a *coreauth.Auth, key string) string {
+	if a != nil && a.Attributes != nil {
+		if value := strings.TrimSpace(a.Attributes[key]); value != "" {
+			return value
+		}
+	}
+	if a != nil && a.Metadata != nil {
+		if value, ok := a.Metadata[key].(string); ok {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (s *Service) pluginModelsForProvider(providerKey string) []*ModelInfo {
@@ -1894,6 +2006,12 @@ func (s *Service) registerModelsForAuth(ctx context.Context, a *coreauth.Auth) {
 		models = applyExcludedModels(models, excluded)
 	case "xai":
 		models = registry.GetXAIModels()
+		models = applyExcludedModels(models, excluded)
+	case "copilot":
+		models = s.fetchCopilotModelsForAuth(ctx, a)
+		if len(models) == 0 {
+			models = defaultCopilotModels()
+		}
 		models = applyExcludedModels(models, excluded)
 	default:
 		// Handle OpenAI-compatibility providers by name using config
